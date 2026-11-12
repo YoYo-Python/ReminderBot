@@ -1,7 +1,17 @@
 {
-  "functions": {
-    "api/check.py": {
-      "maxDuration": 60
+  "builds": [
+    {
+      "src": "api/check.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxDuration": 60
+      }
     }
-  }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/check.py"
+    }
+  ]
 }
