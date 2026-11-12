@@ -11,10 +11,11 @@ Commands:
 Only your CHAT_ID is allowed to use it.
 """
 
+import base64
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -28,6 +29,41 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 CALENDAR_URLS = json.loads(os.environ.get("CALENDAR_URLS", "{}"))
 TZ = ZoneInfo(os.environ.get("TIMEZONE", "Africa/Cairo"))
+GH_TOKEN = os.environ["GH_TOKEN"]
+GH_REPO = os.environ.get("GH_REPO", "YoYo-Python/ReminderBot")
+STATE_PATH = "state.json"
+SEMESTER_END = date(2027, 1, 21)
+
+GH_API = f"https://api.github.com/repos/{GH_REPO}/contents/{STATE_PATH}"
+GH_HEADERS = {
+    "Authorization": f"Bearer {GH_TOKEN}",
+    "Accept": "application/vnd.github+json",
+}
+
+
+def gh_load():
+    try:
+        r = requests.get(GH_API, headers=GH_HEADERS, timeout=25)
+        if r.status_code == 200:
+            j = r.json()
+            return json.loads(base64.b64decode(j["content"]).decode()), j["sha"]
+    except Exception:
+        log.exception("state read failed")
+    return {}, None
+
+
+def gh_save(state, sha):
+    body = {
+        "message": "bot: update state",
+        "content": base64.b64encode(json.dumps(state).encode()).decode(),
+        "branch": "main",
+    }
+    if sha:
+        body["sha"] = sha
+    r = requests.put(GH_API, headers=GH_HEADERS, json=body, timeout=25)
+    if r.status_code not in (200, 201):
+        log.warning("state save failed: %s %s", r.status_code, r.text[:200])
+
 
 app = Flask(__name__)
 
@@ -112,6 +148,20 @@ def parse_day(arg):
         return None
 
 
+def backlog_status(state):
+    b = state.get("backlog", {"left": 21, "total": 21})
+    left = b.get("left", 21)
+    total = b.get("total", 21)
+    if left <= 0:
+        return "🎉 *GIT backlog: CLEARED!*\nYou did it — 21 for 21."
+    days = max(1, (SEMESTER_END - date.today()).days)
+    need = -(-left // days)  # ceil division
+    return (
+        f"📚 *GIT backlog: {left}/{total} left*\n"
+        f"Pace needed: *{need}/day* to clear by Jan 21 (semester end)"
+    )
+
+
 def handle(text):
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower().split("@")[0]
@@ -134,6 +184,22 @@ def handle(text):
         events = fetch_events(days=45)
         return f"📅 *{day:%A, %d %b %Y}*\n\n" + fmt_day(events, day)
 
+    if cmd == "/done":
+        try:
+            n = max(1, int(arg)) if arg else 1
+        except ValueError:
+            return "Usage: /done 3  (how many lectures you finished)"
+        state, sha = gh_load()
+        b = state.get("backlog", {"left": 21, "total": 21})
+        b["left"] = max(0, b.get("left", 21) - n)
+        state["backlog"] = b
+        gh_save(state, sha)
+        return f"✅ {n} down!\n\n" + backlog_status(state)
+
+    if cmd == "/backlog":
+        state, _ = gh_load()
+        return backlog_status(state)
+
     if cmd == "/week":
         events = fetch_events(days=8)
         today = datetime.now(TZ).date()
@@ -150,7 +216,9 @@ def handle(text):
         "/today — what's on today\n"
         "/tomorrow — what's on tomorrow\n"
         "/day 20 — a specific day\n"
-        "/week — the next 7 days"
+        "/week — the next 7 days\n"
+        "/done 3 — log finished GIT lectures\n"
+        "/backlog — how many are left + pace"
     )
 
 
