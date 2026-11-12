@@ -6,9 +6,20 @@
       "config": {
         "maxDuration": 60
       }
+    },
+    {
+      "src": "api/telegram.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxDuration": 60
+      }
     }
   ],
   "routes": [
+    {
+      "src": "/api/telegram",
+      "dest": "api/telegram.py"
+    },
     {
       "src": "/(.*)",
       "dest": "api/check.py"
