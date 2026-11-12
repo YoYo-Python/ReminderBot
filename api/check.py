@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from icalendar import Calendar
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("check")
@@ -217,7 +217,7 @@ def briefing(now, state, events):
 
 # ------------------------------------------------------------------ logic --
 
-def run_check():
+def run_check(test=None):
     now = datetime.now(TZ)
     state, sha = load_state()
     state = prune(state)
@@ -245,12 +245,16 @@ def run_check():
     changed = bool(fired)
 
     # sleep guardian: fires once, between 00:00 and 00:45
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    key = f"sleep|{now.date().isoformat()}"
-    if midnight <= now < midnight + timedelta(minutes=45) and not state.get(key):
-        if send("🌙 *Sleep window in 30 min* — start winding down.\nScreens down, lights low. (12:30 AM target 💤)"):
-            state[key] = True
-            changed = True
+    if test == "sleep":
+        if send("🌙 *TEST — Sleep window in 30 min* — start winding down.\nScreens down, lights low. (12:30 AM target 💤)"):
+            fired.append("(sleep test)")
+    else:
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        key = f"sleep|{now.date().isoformat()}"
+        if midnight <= now < midnight + timedelta(minutes=45) and not state.get(key):
+            if send("🌙 *Sleep window in 30 min* — start winding down.\nScreens down, lights low. (12:30 AM target 💤)"):
+                state[key] = True
+                changed = True
 
     # morning briefing: fires once, between 07:45 and 10:00
     morn = now.replace(hour=7, minute=45, second=0, microsecond=0)
@@ -274,7 +278,7 @@ def run_check():
 @app.route("/api/check")
 def check():
     try:
-        result = run_check()
+        result = run_check(test=request.args.get("test"))
     except Exception:
         log.exception("check failed")
         return jsonify({"error": "check failed"}), 500
