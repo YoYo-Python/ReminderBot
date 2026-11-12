@@ -1,59 +1,56 @@
-# Telegram Task Reminder Bot
+# ReminderBot — Telegram task reminders (Vercel + cron-job.org)
 
-Messages you **30 minutes before every event** in your iCloud calendars.
-Runs on a free cloud host (Render), reads your calendars directly from iCloud —
-your Mac doesn't need to be on.
+Messages **30 minutes before every event** in your iCloud public calendars.
+Free, no credit card anywhere in the stack.
 
-## One-time setup
-
-### 1. Create the bot (2 min)
-1. Open Telegram → message **@BotFather**
-2. `/newbot` → pick a name and username
-3. Copy the **token** (`123456:ABC-DEF...`)
-
-### 2. Publish your calendars as public feeds (5 min)
-1. Go to **icloud.com** → Calendar
-2. Right-click each calendar you want reminders from (**GIT**, **Community**,
-   **Forensic Medicine**, **Home**, ...) → *Share Calendar* → enable
-   **Public Calendar** → copy the link (starts with `webcal://`)
-3. Change `webcal://` → `https://` — that's your feed URL
-   (they're read-only, nobody can see your events unless they have the link)
-
-### 3. Deploy to Render (free, 10 min)
-1. Push this folder to a GitHub repo (or use Render's "Direct deploy")
-2. render.com → **New → Web Service** → connect the repo
-   - Runtime: **Python 3**
-   - Build command: `pip install -r requirements.txt`
-   - Start command: `python bot.py`
-   - Instance type: **Free**
-3. Add **Environment variables**:
-   | Key | Value |
-   |---|---|
-   | `TELEGRAM_TOKEN` | your BotFather token |
-   | `CALENDAR_URLS` | `{"GIT": "https://...ics", "Community": "https://...ics", "Forensic Medicine": "https://...ics", "Home": "https://...ics"}` |
-   | `REMIND_MINUTES` | `30` |
-
-### 4. Keep the free tier awake
-Free Render services sleep after 15 min of no traffic.
-1. cron-job.org (free) → create a job hitting your Render URL every 10 min
-2. Done — the service stays warm.
-
-### 5. Register yourself
-Message your bot **/start** in Telegram. It saves your chat ID and replies
-with it. Send **/tasks** to see the next 5 upcoming tasks as a test.
-
-## Local test (optional, before deploying)
-```bash
-cd telegram-task-bot
-pip install -r requirements.txt
-export TELEGRAM_TOKEN="123456:ABC..."
-export CALENDAR_URLS='{"Home": "https://...ics"}'
-python bot.py
+## Architecture
+```
+cron-job.org (every 5 min, free)
+      │  GET
+      ▼
+Vercel /api/check  (Hobby plan, free, no card)
+      │  reads iCloud webcal feeds
+      │  sends Telegram message if a task's -30 min mark arrived
+      ▼
+state.json in THIS repo (GitHub API) = the database
 ```
 
+## Setup
+
+### 1. Vercel (no card)
+1. vercel.com → sign in with GitHub → **Add New → Project**
+2. Import `YoYo-Python/ReminderBot`
+3. Framework preset: **Other** (it auto-detects the Python API)
+4. Add **Environment Variables**:
+
+| Key | Value |
+|---|---|
+| `TELEGRAM_TOKEN` | your BotFather token |
+| `CHAT_ID` | `1816485344` |
+| `CALENDAR_URLS` | JSON of feed URLs, e.g. `{"GIT": "https://...ics", "Community": "https://...ics", "Forensic Medicine": "https://...ics", "Home": "https://...ics"}` |
+| `GH_TOKEN` | GitHub PAT — see step 2 |
+| `REMIND_MINUTES` | `30` |
+
+5. **Deploy**
+
+### 2. GitHub token (for the state file — no card)
+1. github.com → Settings → Developer settings → **Fine-grained personal access tokens** → Generate new
+2. Repository access: **Only select repositories** → `ReminderBot`
+3. Permissions: **Contents → Read and write**
+4. Paste the token as the `GH_TOKEN` env var in Vercel, then **Redeploy**
+
+### 3. cron-job.org (no card)
+1. cron-job.org → create cron job
+2. URL: `https://YOUR-PROJECT.vercel.app/api/check`
+3. Schedule: **every 5 minutes**
+
+### 4. Test
+Open `https://YOUR-PROJECT.vercel.app/api/check` in a browser — you should see
+`{"checked": N, "sent": [], "known_sent": M}`.
+Send `/tasks`… not needed — this version has no commands; just create an
+event ~35 min in the future and wait for the buzz.
+
 ## Notes
-- Reminders fire for events starting within the next 36 h.
-- The bot never sends duplicate reminders (state is deduped per event+start time).
-- iCloud public feeds update within ~1-2 min of you adding an event,
-  so last-minute calendar edits are picked up.
-# ReminderBot
+- iCloud public feeds update within ~1–2 min of adding an event.
+- `state.json` commits appear in the repo whenever a reminder fires.
+- The old `bot.py` (Render version) is kept for reference but is not used here.

@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/check.py": {
+      "maxDuration": 60
+    }
+  }
+}
