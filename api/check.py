@@ -1,17 +1,13 @@
 """
-Reminder engine (Vercel + cron-job.org, pinged every 5 min)
+Reminder engine (Vercel + cron-job.org)
 
 Fires:
   1. Task reminders   - REMIND_MINUTES before every calendar event
-  2. Sleep guardian   - 00:00 nightly (skip-aware later if needed)
-  3. Morning briefing - 07:45 daily: schedule + weather + prayers + backlog
+  2. Sleep guardian   - once per night, 00:00-00:45 window
+  3. Morning briefing - once per day, 07:45-10:00 window
 
 State lives in state.json in this GitHub repo (via Contents API).
-
-Env vars:
-  TELEGRAM_TOKEN, CHAT_ID, CALENDAR_URLS (JSON), GH_TOKEN
-Optional:
-  REMIND_MINUTES (30), GH_REPO (YoYo-Python/ReminderBot), TIMEZONE (Africa/Cairo)
+Fail-safe: if state cannot be read, NOTHING is sent (prevents resend storms).
 """
 
 import base64
@@ -50,41 +46,66 @@ app = Flask(__name__)
 # ------------------------------------------------------------------ state --
 
 def load_state():
+    """Returns (state, sha) or (None, None) if state is unreadable."""
     try:
         r = requests.get(GH_API, headers=GH_HEADERS, timeout=25)
         if r.status_code == 200:
             content = base64.b64decode(r.json()["content"]).decode()
             return json.loads(content), r.json()["sha"]
+        if r.status_code == 404:
+            return {}, None
+        log.warning("state read failed: %s", r.status_code)
     except Exception:
         log.exception("state read failed")
-    return {}, None
+    return None, None
 
 
-def save_state(state, sha):
-    body = {
-        "message": "bot: update state",
-        "content": base64.b64encode(json.dumps(state).encode()).decode(),
-        "branch": BRANCH,
-    }
-    if sha:
-        body["sha"] = sha
-    r = requests.put(GH_API, headers=GH_HEADERS, json=body, timeout=25)
-    if r.status_code not in (200, 201):
-        log.warning("state save failed: %s %s", r.status_code, r.text[:200])
+def save_state(state, sha, modified_keys):
+    """Save with conflict retry: on 409, re-read, merge our modified keys, retry."""
+    for attempt in range(3):
+        body = {
+            "message": "bot: update state",
+            "content": base64.b64encode(json.dumps(state).encode()).decode(),
+            "branch": BRANCH,
+        }
+        if sha:
+            body["sha"] = sha
+        r = requests.put(GH_API, headers=GH_HEADERS, json=body, timeout=25)
+        if r.status_code in (200, 201):
+            return True
+        if r.status_code not in (409, 422):
+            log.warning("state save failed: %s %s", r.status_code, r.text[:200])
+            return False
+        log.info("state conflict, retrying (%d)", attempt)
+        fresh, sha = load_state()
+        if fresh is None:
+            return False
+        fresh.update({k: state[k] for k in modified_keys if k in state})
+        state = fresh
+    return False
 
 
 def prune(state):
-    cutoff = datetime.now(TZ) - timedelta(days=7)
+    """Drop event sent-flags older than 7 days. Daily keys (sleep/brief) kept 30 days."""
+    cutoff_event = datetime.now(TZ) - timedelta(days=7)
+    cutoff_daily = datetime.now(TZ) - timedelta(days=30)
     kept = {}
     for k, v in state.items():
         if "|" not in k:
             kept[k] = v  # named keys like "backlog"
             continue
+        kind, suffix = k.split("|", 1)
         try:
-            if datetime.fromisoformat(k.split("|", 1)[1]) >= cutoff:
+            d = datetime.fromisoformat(suffix)
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=TZ)  # date-only keys like sleep|2026-11-13
+            cutoff = cutoff_daily if kind in ("sleep", "brief") else cutoff_event
+            if d >= cutoff:
                 kept[k] = v
+            else:
+                log.info("pruned %s", k)
         except Exception:
-            pass
+            log.info("pruned unparseable key %s", k)
     return kept
 
 
@@ -220,10 +241,16 @@ def briefing(now, state, events):
 def run_check(test=None):
     now = datetime.now(TZ)
     state, sha = load_state()
+    if state is None:
+        # fail-safe: never send anything if we can't prove what was already sent
+        log.warning("state unavailable - skipping all sends this run")
+        return {"error": "state unavailable, skipped"}
+
     state = prune(state)
     events = fetch_events()
 
     fired = []
+    modified = []
     for ev in events:
         key = f"{ev['uid']}|{ev['start'].isoformat()}"
         if state.get(key):
@@ -240,32 +267,37 @@ def run_check(test=None):
             f"starts in *{mins_left} min* — get ready!"
         ):
             state[key] = True
+            modified.append(key)
             fired.append(ev["summary"])
 
     changed = bool(fired)
 
-    # sleep guardian: fires once, between 00:00 and 00:45
+    # sleep guardian: fires once per night
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    key = f"sleep|{now.date().isoformat()}"
     if test == "sleep":
-        if send("🌙 *TEST — Sleep window in 30 min* — start winding down.\nScreens down, lights low. (12:30 AM target 💤)"):
+        if send("🌙 *TEST — Sleep window in 30 min* (test message)"):
             fired.append("(sleep test)")
-    else:
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        key = f"sleep|{now.date().isoformat()}"
-        if midnight <= now < midnight + timedelta(minutes=45) and not state.get(key):
-            if send("🌙 *Sleep window in 30 min* — start winding down.\nScreens down, lights low. (12:30 AM target 💤)"):
-                state[key] = True
-                changed = True
-
-    # morning briefing: fires once, between 07:45 and 10:00
-    morn = now.replace(hour=7, minute=45, second=0, microsecond=0)
-    key = f"brief|{now.date().isoformat()}"
-    if morn <= now < morn + timedelta(hours=2, minutes=15) and not state.get(key):
-        if send(briefing(now, state, events)):
+    elif midnight <= now < midnight + timedelta(minutes=45) and not state.get(key):
+        if send("🌙 *Sleep window in 30 min* — start winding down.\nScreens down, lights low. (12:30 AM target 💤)"):
             state[key] = True
+            modified.append(key)
             changed = True
 
-    if changed:
-        save_state(state, sha)
+    # morning briefing: fires once per day
+    morn = now.replace(hour=7, minute=45, second=0, microsecond=0)
+    key = f"brief|{now.date().isoformat()}"
+    if test == "brief":
+        if send(briefing(now, state, events)):
+            fired.append("(brief test)")
+    elif morn <= now < morn + timedelta(hours=2, minutes=15) and not state.get(key):
+        if send(briefing(now, state, events)):
+            state[key] = True
+            modified.append(key)
+            changed = True
+
+    if modified:
+        save_state(state, sha, modified)
 
     return {
         "checked": len(events),

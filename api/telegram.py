@@ -47,22 +47,36 @@ def gh_load():
         if r.status_code == 200:
             j = r.json()
             return json.loads(base64.b64decode(j["content"]).decode()), j["sha"]
+        if r.status_code == 404:
+            return {}, None
+        log.warning("state read failed: %s", r.status_code)
     except Exception:
         log.exception("state read failed")
-    return {}, None
+    return None, None
 
 
-def gh_save(state, sha):
-    body = {
-        "message": "bot: update state",
-        "content": base64.b64encode(json.dumps(state).encode()).decode(),
-        "branch": "main",
-    }
-    if sha:
-        body["sha"] = sha
-    r = requests.put(GH_API, headers=GH_HEADERS, json=body, timeout=25)
-    if r.status_code not in (200, 201):
-        log.warning("state save failed: %s %s", r.status_code, r.text[:200])
+def gh_save(state, sha, modified_keys):
+    for attempt in range(3):
+        body = {
+            "message": "bot: update state",
+            "content": base64.b64encode(json.dumps(state).encode()).decode(),
+            "branch": "main",
+        }
+        if sha:
+            body["sha"] = sha
+        r = requests.put(GH_API, headers=GH_HEADERS, json=body, timeout=25)
+        if r.status_code in (200, 201):
+            return True
+        if r.status_code not in (409, 422):
+            log.warning("state save failed: %s %s", r.status_code, r.text[:200])
+            return False
+        log.info("state conflict, retrying (%d)", attempt)
+        fresh, sha = gh_load()
+        if fresh is None:
+            return False
+        fresh.update({k: state[k] for k in modified_keys if k in state})
+        state = fresh
+    return False
 
 
 app = Flask(__name__)
@@ -190,14 +204,18 @@ def handle(text):
         except ValueError:
             return "Usage: /done 3  (how many lectures you finished)"
         state, sha = gh_load()
+        if state is None:
+            return "⚠️ Couldn't reach the state store — try again in a minute."
         b = state.get("backlog", {"left": 21, "total": 21})
         b["left"] = max(0, b.get("left", 21) - n)
         state["backlog"] = b
-        gh_save(state, sha)
+        gh_save(state, sha, ["backlog"])
         return f"✅ {n} down!\n\n" + backlog_status(state)
 
     if cmd == "/backlog":
         state, _ = gh_load()
+        if state is None:
+            return "⚠️ Couldn't reach the state store — try again in a minute."
         return backlog_status(state)
 
     if cmd == "/week":
